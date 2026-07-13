@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Logs
+*.log
+logs/
+log/
+
+# OS / Editor
+.DS_Store
+.vscode/
+
+# Build / cache
+build/
+dist/
+*.egg-info/
+
+# Secrets
+.env
+*.pem
+*.key

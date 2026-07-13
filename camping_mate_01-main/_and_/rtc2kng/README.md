@@ -1,0 +1,336 @@
+# RTC2KNG
+
+![실행 화면](README_image.jpg)
+*(이미지 캡션: 프로젝트 실행 예시 화면)*
+
+## 1. 개요
+
+이 프로젝트는 WebRTC 기술을 활용하여 로봇을 원격으로 제어하고, 로봇의 카메라 영상 및 오디오를 실시간으로 스트리밍 받을 수 있는 시스템입니다. Python으로 작성된 서버를 중심으로, Python 로봇 클라이언트 및 다양한 형태의 오퍼레이터 클라이언트(Python GUI, 웹 브라우저, Unity)와 연동됩니다.
+
+## 2. 주요 기능
+
+* 실시간 비디오/오디오 스트리밍 (로봇 → 오퍼레이터)
+* 양방향 데이터 채널을 통한 메시지 및 제어 명령어 교환
+* 다중 오퍼레이터 환경 지원 (서버 로직에 따라 특정 로봇에 여러 오퍼레이터 동시 연결 가능)
+* Python, 웹 브라우저, Unity 등 다양한 플랫폼의 오퍼레이터 클라이언트 지원
+
+## 3. 프로젝트 구성 요소
+
+* **시그널링 서버 (`server.py`)**:
+    * FastAPI와 Websockets을 사용하여 클라이언트 간 WebRTC 시그널링 메시지(Offer, Answer, ICE Candidate)를 중계합니다.
+    * 클라이언트(로봇, 오퍼레이터) 등록 및 특정 방(Room) 기반의 통신 그룹 관리를 담당합니다.
+* **로봇 클라이언트 (`robot_client.py`)**:
+    * 실제 로봇 또는 로봇 시뮬레이션 환경에서 실행됩니다.
+    * 카메라, 마이크 등의 미디어 장치로부터 데이터를 받아 오퍼레이터에게 스트리밍합니다.
+    * 오퍼레이터로부터 제어 명령을 수신하여 로봇을 동작시킵니다.
+    * `robot_peer_connection.py`: 로봇 측의 WebRTC 피어 연결 및 미디어 처리를 담당합니다.
+* **오퍼레이터 클라이언트**:
+    * **Python 오퍼레이터 (`operator_client.py`)**:
+        * PySide6를 사용한 GUI 환경 또는 콘솔 환경에서 로봇을 제어하고 미디어를 수신합니다.
+        * `operator_peer_connection.py`: Python 오퍼레이터 측의 WebRTC 피어 연결 및 미디어 처리를 담당합니다.
+    * **웹 오퍼레이터 (`operator_client.html`)**:
+        * 웹 브라우저에서 실행되는 HTML/JavaScript 기반의 오퍼레이터 인터페이스입니다.
+        * 서버 접속 후 로봇의 미디어를 수신하고 데이터 채널을 통해 메시지를 교환할 수 있습니다.
+    * **Unity 오퍼레이터**:
+        * Unity 게임 엔진으로 개발된 오퍼레이터 클라이언트입니다. (상세 설정은 문서 후반부 "6. Unity 오퍼레이터 클라이언트" 참고)
+
+## 4. Python 환경 설정 및 실행
+
+이 섹션에서는 Python으로 구현된 서버, 로봇 클라이언트, Python 오퍼레이터 클라이언트, 그리고 웹 오퍼레이터에 대한 설정 및 실행 방법을 안내합니다.
+
+### 4.1. Python 의존성 설치
+
+* **Python 버전**: Python 3.8 이상을 권장합니다.
+* **라이브러리 설치**:
+    이 프로젝트는 서버, 로봇, 오퍼레이터 각 부분에 따라 필요한 Python 라이브러리가 다를 수 있습니다. 각 환경에 맞는 `requirements` 파일을 사용하거나, 아래 전체 목록을 참고하여 설치할 수 있습니다. (프로젝트 루트에 각 컴포넌트별 `requirements_*.txt` 파일이 있다면 해당 파일을 사용하세요.)
+
+    * **개별 `requirements` 파일 사용 시 (추천)**:
+        프로젝트 루트에 다음과 같은 파일들이 있다면 각 환경에 맞게 설치합니다.
+        ```bash
+        # 서버 실행 환경용
+        pip install -r requirements_server.txt
+
+        # 로봇 클라이언트 실행 환경용
+        pip install -r requirements_robot.txt
+
+        # Python 오퍼레이터 클라이언트 실행 환경용
+        pip install -r requirements_operator.txt
+
+        # (선택) 모든 개발 관련 의존성 (예: requirements_dev.txt)
+        # pip install -r requirements_dev.txt
+        ```
+
+    * **전체 주요 라이브러리 목록 (수동 설치 또는 공통 `requirements.txt` 사용 시)**:
+        ```bash
+        pip install fastapi uvicorn websockets requests aiortc pypubsub PySide6 pyaudio
+        ```
+        * `fastapi`: 현대적이고 빠른 웹 프레임워크 (서버용)
+        * `uvicorn`: ASGI 서버 (FastAPI 실행용)
+        * `websockets`: WebSocket 클라이언트 및 서버 구현용
+        * `requests`: HTTP 요청용 (로봇 등록 등)
+        * `aiortc`: Python용 WebRTC 라이브러리
+        * `pypubsub`: 발행-구독 메시징 패턴 라이브러리
+        * `PySide6`: Python용 Qt6 바인딩 (Python 오퍼레이터 GUI용)
+        * `pyaudio`: 오디오 입출력 라이브러리 (시스템에 따라 PortAudio 등 추가 의존성 설치 필요 가능)
+
+### 4.2. 서버 실행 (`server.py`)
+
+1.  터미널을 열고 프로젝트의 루트 디렉토리로 이동합니다.
+2.  다음 명령어를 사용하여 시그널링 서버를 실행합니다:
+    ```bash
+    python server.py
+    ```
+    또는 `uvicorn`을 직접 사용할 경우:
+    ```bash
+    uvicorn server:app --host 0.0.0.0 --port 25000
+    ```
+    기본적으로 서버는 `0.0.0.0` 주소의 `25000` 포트에서 실행됩니다.
+
+### 4.3. 로봇 클라이언트 실행 (`robot_client.py`)
+
+1.  `robot_client.py` 파일 상단의 `SERVER_IP`와 `SERVER_PORT` 변수를 실행 중인 서버의 IP 주소와 포트로 설정합니다.
+    ```python
+    # robot_client.py
+    SERVER_IP = 'YOUR_SERVER_IP'  # 예: '125.131.105.165' 또는 로컬 테스트 시 'localhost'
+    SERVER_PORT = 25000
+    ROBOT_ID = 'test_robot'       # 로봇 고유 ID
+    ROOM_ID = 'test_room'         # 접속할 방 ID
+    ```
+2.  터미널에서 다음 명령어로 로봇 클라이언트를 실행합니다:
+    ```bash
+    python robot_client.py
+    ```
+
+### 4.4. Python 오퍼레이터 클라이언트 실행 (`operator_client.py`)
+
+1.  `operator_client.py` 파일 상단의 `SERVER_IP`와 `SERVER_PORT` 변수를 실행 중인 서버의 IP 주소와 포트로 설정합니다.
+    ```python
+    # operator_client.py
+    SERVER_IP = 'YOUR_SERVER_IP'  # 예: '125.131.105.165' 또는 로컬 테스트 시 'localhost'
+    SERVER_PORT = 25000
+    OPERATOR_ID = 'test_operator' # 오퍼레이터 고유 ID
+    ROOM_ID = 'test_room'         # 접속할 방 ID (로봇과 동일해야 함)
+    ```
+2.  터미널에서 다음 명령어로 Python 오퍼레이터 클라이언트를 실행합니다:
+    ```bash
+    python operator_client.py
+    ```
+
+### 4.5. 웹 오퍼레이터 클라이언트 실행 (`operator_client.html`)
+
+1.  웹 브라우저를 엽니다.
+2.  주소창에 다음 URL을 입력하여 접속합니다 (125.131.105.165:25000):
+    * URL 형식: `http://<서버_IP_주소>:<서버_포트>/static/operator_client.html?room_id=<접속할_방_ID>`
+    * 로컬 테스트 시 예시: `http://localhost:25000/static/operator_client.html?room_id=test_room`
+    * 원격 서버 접속 시 예시: `http://125.131.105.165:25000/static/operator_client.html?room_id=test_room`
+
+### 4.6. 로컬 환경 전체 테스트 (Python 및 웹 부분)
+
+로컬 머신에서 서버, 로봇 클라이언트, Python/웹 오퍼레이터 클라이언트를 모두 실행하여 테스트하는 방법입니다.
+
+1.  **서버 실행** (터미널 1):
+    ```bash
+    python server.py
+    ```
+2.  **로봇 클라이언트 설정 및 실행** (터미널 2):
+    * `robot_client.py`에서 `SERVER_IP = 'localhost'`로 설정합니다.
+    * 실행: `python robot_client.py`
+3.  **오퍼레이터 클라이언트 실행** (터미널 3 또는 웹 브라우저):
+    * **Python 오퍼레이터**:
+        * `operator_client.py`에서 `SERVER_IP = 'localhost'`로 설정합니다.
+        * 실행: `python operator_client.py`
+    * **웹 오퍼레이터**:
+        * 웹 브라우저에서 `http://localhost:25000` (로봇과 동일한 `ROOM_ID`)로 접속합니다.
+
+## 5. 코드 구조 및 주요 파일 설명 (Python 중심)
+
+* `server.py`: FastAPI 기반의 WebRTC 시그널링 및 메시지 중계 서버 로직.
+* `robot_client.py`: 로봇 측 메인 애플리케이션 로직. 미디어 스트리밍 및 제어 명령 처리.
+* `robot_peer_connection.py`: 로봇 측의 `aiortc.RTCPeerConnection` 래핑 및 WebRTC 이벤트 처리.
+* `operator_client.py`: Python (PySide6) 오퍼레이터 측 메인 애플리케이션 로직.
+* `operator_peer_connection.py`: Python 오퍼레이터 측의 `aiortc.RTCPeerConnection` 래핑 및 WebRTC 이벤트 처리.
+* `operator_client.html`: JavaScript를 사용한 웹 브라우저 기반 오퍼레이터 클라이언트 UI 및 로직.
+* (기타 Python 헬퍼 모듈들: `camera_manager.py`, `audio_track.py` 등)
+
+---
+
+## 6. Unity 오퍼레이터 클라이언트 설정 및 실행
+
+이 섹션에서는 Unity 게임 엔진을 사용하여 오퍼레이터 클라이언트를 설정하고 실행하는 방법을 안내합니다.
+
+### 6.1. Unity 환경 의존성
+
+* **Unity Editor**: `2022.3.6f1 LTS` (또는 이와 호환되는 버전) 권장.
+* **필수 패키지**: Unity 프로젝트의 Unity Package Manager에서 `Add package from git URL...`에서 아래를 설치합니다.
+
+    * **Newtonsoft.Json-for-Unity**:
+        * https://github.com/jilleJr/Newtonsoft.Json-for-Unity.git#upm
+
+    * **WebRTC Package for Unity**:
+      * com.unity.webrtc@3.0.0-pre.8
+
+### 6.2. 프로젝트 폴더 구성 및 파일 임포트
+
+이 Python 프로젝트 저장소에 포함된 Unity 관련 파일들을 사용자의 Unity 프로젝트로 가져옵니다. (제공해주신 이미지 `image_766b4d.png` 참고 시, Python 프로젝트 루트의 `unity/` 폴더 내 `Scripts`와 `Plugins` 폴더가 있는 구조를 가정합니다.)
+
+1.  **파일 복사**:
+    * 본 저장소의 `unity/Scripts/` 폴더 내에 있는 모든 `.cs` 파일들을 사용자의 **Unity 프로젝트 `Assets/Scripts/` 폴더** (또는 원하는 다른 이름의 스크립트 폴더)로 복사합니다.
+    * 본 저장소의 `unity/Plugins/` 폴더가 있고 그 안에 `WebSocketSharp.dll`과 같은 필요한 DLL 파일이 있다면, 해당 DLL 파일들을 사용자의 **Unity 프로젝트 `Assets/Plugins/` 폴더**로 복사합니다.
+        * **중요**:
+            * `Newtonsoft.Json`과 `com.unity.webrtc`는 위 "6.1. Unity 환경 의존성"에 따라 UPM으로 설치하므로, 해당 DLL을 직접 `Plugins` 폴더에 넣을 필요는 없습니다.
+            * `WebSocketSharp.dll` 역시 UPM 패키지 (예: 특정 UPM WebSocket 클라이언트 패키지)를 통해 관리하고 있다면 직접 복사할 필요는 없습니다. 프로젝트에서 `WebSocketSharp` 네임스페이스를 사용하므로, 이 라이브러리가 Unity 프로젝트에 포함되어 있어야 합니다.
+
+2.  **Unity Editor 확인**: Unity Editor에서 프로젝트를 열고, 복사한 스크립트들이 정상적으로 컴파일되는지 Console 창을 통해 확인합니다.
+
+### 6.3. 씬(Scene) 구성 및 컴포넌트 추가 (Hierarchy 창 기준)
+
+메인 씬(Scene)에 다음과 같이 게임 오브젝트(GameObject)를 설정합니다.
+
+* **(필수/자동생성 가능) `MainThreadDispatcher` 오브젝트**:
+    * 이름: `MainThreadDispatcher`
+    * 컴포넌트: `UnityMainThreadDispatcher.cs`
+    * *참고: 이 스크립트는 코드 내에서 `Instance()` 호출 시 씬에 없으면 자동으로 생성될 수 있습니다.*
+
+* **`WebRTC_System` 오브젝트** (중앙 관리용):
+    * 이름: `WebRTC_System`
+    * 컴포넌트:
+        * `WebRTCManager.cs`
+        * `WebSocketClient.cs`
+        * `AudioReceiver.cs` (오디오 수신 시)
+        * `DataReceiver.cs` (데이터 채널 수신 시)
+        * *(선택)* `DataSender.cs` (데이터 채널 송신 테스트용)
+
+* **UI 비디오 표시용 오브젝트**:
+    1.  **Canvas 생성**: Hierarchy 창 > UI > Canvas.
+    2.  **RawImage 생성**: Canvas 하위에 UI > Raw Image.
+        * 이름: `VideoDisplayImage`
+        * 컴포넌트: `VideoReceiver.cs` (이 오브젝트에 추가)
+
+### 6.4. 컴포넌트 간 연결 설정 (Inspector 창 기준)
+
+* **`WebRTC_System` 게임 오브젝트 선택 시**:
+    * `WebRTC Manager (Script)` 컴포넌트:
+        * **`Server Ip`**: 서버 IP 주소 (예: "localhost").
+        * **`Server Port`**: 서버 포트 (예: 25000).
+        * **`Room Id`**: 방 ID (예: "test_room").
+        * **`Video Receiver`**: `VideoDisplayImage` 게임 오브젝트를 드래그하여 할당.
+        * **`Audio Receiver`**: `WebRTC_System` 오브젝트 자신 (또는 `AudioReceiver`가 있는 다른 오브젝트)을 드래그하여 할당.
+
+* **`VideoDisplayImage` 게임 오브젝트 선택 시**:
+    * `Video Receiver (Script)` 컴포넌트:
+        * **`Display Image`**: `VideoDisplayImage` 오브젝트 자신의 `Raw Image` 컴포넌트를 드래그하여 할당.
+
+### 6.5. Unity 오퍼레이터 실행 및 테스트
+
+1.  모든 설정과 연결이 완료되었는지 확인 후 씬을 저장합니다.
+2.  Python 시그널링 서버 (`server.py`)와 로봇 클라이언트 (`robot_client.py`)가 실행 중인지 확인합니다.
+3.  Unity Editor에서 Play 버튼을 눌러 오퍼레이터 클라이언트를 실행하고 연결을 테스트합니다.
+    * 로컬 테스트 시 `WebRTCManager`의 `Server Ip`를 "localhost"로 설정합니다.
+
+### 6.6. Unity 관련 주요 스크립트 설명
+
+* `UnityMainThreadDispatcher.cs`: Unity 메인 스레드에서 작업을 실행하기 위한 헬퍼 스크립트. 비동기 콜백 등을 안전하게 처리.
+* `WebRTCManager.cs`: Unity 오퍼레이터의 WebRTC 연결 설정, 시그널링, 미디어 수신/송신, 데이터 채널 등을 총괄하는 핵심 관리자.
+* `SignalingMessage.cs`: 서버와 주고받는 시그널링 메시지(Offer, Answer, Candidate 등)의 C# 데이터 구조 정의. (JSON 직렬화/역직렬화 대상)
+* `VideoReceiver.cs`: 수신된 비디오 트랙을 Unity UI의 `RawImage`에 렌더링.
+* `AudioReceiver.cs`: 수신된 오디오 트랙을 `AudioSource`를 통해 재생.
+* `DataReceiver.cs`: 데이터 채널을 통해 수신된 텍스트 메시지 처리.
+* `WebSocketClient.cs`: 지정된 WebSocket 서버와의 연결 및 메시지 송수신 담당.
+* `DataSender.cs`: 데이터 채널을 통해 메시지를 전송하는 예제 스크립트.
+
+### Unity 오퍼레이터의 VR 컨트롤러 데이터 전송 형식
+
+Unity 오퍼레이터 클라이언트에서 로봇으로 전송되는 VR 컨트롤러 입력 데이터는 WebRTC 데이터 채널을 통해 JSON 형식으로 전달됩니다. 이 데이터는 컨트롤러의 현재 상태를 나타내며, 주기적으로 (예: 100ms 마다) 전송될 수 있습니다.
+
+**최상위 JSON 객체 구조 (`VRControllerPayload`):**
+
+* `topic` (string): 메시지의 종류를 나타냅니다. VR 컨트롤러 데이터의 경우 항상 `"vr_controller"`입니다.
+* `target` (string): 메시지를 수신할 대상 ID입니다. 일반적으로 특정 로봇 ID 또는 모든 대상(`"all"`)으로 설정됩니다.
+* `value` 
+  * `left` (object): 왼손 컨트롤러의 상세 입력 데이터를 담는 객체입니다. (아래 `ControllerInput 상세 구조` 참고)
+  * `right` (object): 오른손 컨트롤러의 상세 입력 데이터를 담는 객체입니다. (아래 `ControllerInput 상세 구조` 참고)
+
+**컨트롤러 입력 상세 구조 (`ControllerInput` - `left` 또는 `right` 객체 내부):**
+
+* `axes` (array of float): 아날로그 입력 값들의 배열입니다. 값의 범위와 순서는 다음과 같습니다.
+    * `[0]`: 썸스틱(Thumbstick) X축 값. 범위: `-1.0` (왼쪽) ~ `1.0` (오른쪽), 중앙 `0.0`.
+    * `[1]`: 썸스틱(Thumbstick) Y축 값. 범위: `-1.0` (아래) ~ `1.0` (위), 중앙 `0.0`.
+    * `[2]`: 트리거(Trigger)를 누른 정도. 범위: `0.0` (누르지 않음) ~ `1.0` (완전히 누름).
+    * `[3]`: 그립(Grip) 버튼을 쥔 정도. 범위: `0.0` (쥐지 않음) ~ `1.0` (완전히 쥠).
+* `buttons` (array of boolean): 버튼 및 입력 장치의 물리적인 '눌림(Press)' 상태 배열입니다. **배열 요소의 순서가 중요합니다.**
+    * `[0]`: 주 버튼(Primary Button: Meta Quest에서 A 또는 X 버튼) 눌림 여부 (`true`/`false`).
+    * `[1]`: 보조 버튼(Secondary Button: Meta Quest에서 B 또는 Y 버튼) 눌림 여부.
+    * `[2]`: 썸스틱(Thumbstick) 클릭(Press) 여부.
+    * `[3]`: 트리거(Trigger)가 일정 수준 이상 당겨져 '눌림'으로 간주되는지 여부.
+    * `[4]`: 그립(Grip) 버튼이 일정 수준 이상 쥐어져 '눌림'으로 간주되는지 여부.
+    * `[5]`: 메뉴 버튼(Menu Button) 눌림 여부 (보통 왼손 컨트롤러에만 있으며, 오른손 컨트롤러의 경우 이 값은 항상 `false`로 전송됩니다).
+* `touch` (array of boolean): 버튼 및 입력 장치 표면에 손가락이 '접촉(Touch)'했는지 여부를 나타내는 상태 배열입니다. **배열 요소의 순서가 중요합니다.**
+    * `[0]`: 주 버튼(Primary Button: A/X) 터치 여부.
+    * `[1]`: 보조 버튼(Secondary Button: B/Y) 터치 여부.
+    * `[2]`: 썸스틱(Thumbstick) 터치 여부.
+* `position` (array of float): 컨트롤러의 현재 위치를 나타내는 배열 `[x, y, z]`입니다. Unity 월드 좌표계를 기준으로 합니다.
+* `rotation` (array of float): 컨트롤러의 현재 회전 상태를 나타내는 쿼터니언(Quaternion) 배열 `[x, y, z, w]`입니다. Unity 월드 좌표계를 기준으로 합니다.
+
+**JSON 전송 예시:**
+
+```json
+{
+  "topic": "vr_controller",
+  "target": "all",
+  "left": {
+    "axes": [
+      -0.15,  // 썸스틱 X
+      0.80,   // 썸스틱 Y
+      0.0,    // 트리거 값
+      0.25    // 그립 값
+    ],
+    "buttons": [
+      false,  // 주 버튼 눌림
+      true,   // 보조 버튼 눌림
+      false,  // 썸스틱 클릭
+      false,  // 트리거 눌림
+      true,   // 그립 눌림
+      false   // 메뉴 버튼 눌림
+    ],
+    "touch": [
+      false,  // 주 버튼 터치
+      true,   // 보조 버튼 터치
+      true    // 썸스틱 터치
+    ],
+    "position": [-0.27, 0.75, 0.48],
+    "rotation": [0.10, -0.15, -0.30, -0.92]
+  },
+  "right": {
+    "axes": [
+      0.0,    // 썸스틱 X
+      0.0,    // 썸스틱 Y
+      0.95,   // 트리거 값
+      0.0     // 그립 값
+    ],
+    "buttons": [
+      true,   // 주 버튼 눌림
+      false,  // 보조 버튼 눌림
+      false,  // 썸스틱 클릭
+      true,   // 트리거 눌림
+      false,  // 그립 눌림
+      false   // 메뉴 버튼 눌림 (오른손이므로 항상 false)
+    ],
+    "touch": [
+      true,   // 주 버튼 터치
+      false,  // 보조 버튼 터치
+      false   // 썸스틱 터치
+    ],
+    "position": [0.22, 0.81, 0.41],
+    "rotation": [-0.20, -0.10, 0.50, 0.80]
+  }
+}
+
+## 7. 문제 해결 및 추가 정보
+
+* **방화벽 설정**: 원격에서 접속 시 서버 PC의 방화벽에서 해당 포트(기본값: 25000)가 열려 있는지 확인하세요. 공유기 사용 시 포트 포워딩 설정이 필요할 수 있습니다.
+* **STUN 서버**: WebRTC 연결을 위해 STUN 서버(`stun:stun.l.google.com:19302`)를 사용합니다. 네트워크 환경에 따라 다른 STUN/TURN 서버 설정이 필요할 수 있습니다.
+* **Python 라이브러리 버전**: 명시된 라이브러리 외에 `pyaudio` 등은 운영체제에 맞는 추가적인 설정이나 컴파일된 바이너리가 필요할 수 있습니다.
+
+---
+
+이 README가 프로젝트를 이해하고 사용하는 데 도움이 되길 바랍니다! 😊

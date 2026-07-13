@@ -1,0 +1,6 @@
+websockets
+pypubsub
+--trusted-host 175.126.123.199
+--index-url http://keti:dev123@175.126.123.199:7070
+ketirtc
+pyside6

@@ -22,9 +22,9 @@ def _bootstrap_repo_root():
 _bootstrap_repo_root()
 
 from _and_.and_robot import AdaptiveNetworkDaemon
-from gerri.robot.examples.camping_mate.camping_mate_config import ROBOT_INFO, VIDEO_INFO, AUDIO_INFO
-from gerri.robot.examples.camping_mate.camping_mate_base_controller import CampingMateBaseController
-from gerri.robot.examples.camping_mate.camping_mate_sub_controller import CampingMateSubController
+from gerri.robot.examples.camping_test.camping_mate_config import ROBOT_INFO, VIDEO_INFO, AUDIO_INFO
+from gerri.robot.examples.camping_test.camping_mate_base_controller import CampingMateBaseController
+from gerri.robot.examples.camping_test.camping_mate_sub_controller import CampingMateSubController
 
 
 def main():

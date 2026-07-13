@@ -4,7 +4,7 @@ import threading
 import time
 
 from robot_status import RobotStatus
-from gerri.robot.examples.camping_mate.camping_mate_controller import CampingMateController
+from gerri.robot.examples.camping_test.camping_mate_controller import CampingMateController
 
 
 class CampingMateSubController:

@@ -67,4 +67,3 @@ class CampingMateBaseController(ManipulatorFunction, MobileFunction):
 
 
 
-

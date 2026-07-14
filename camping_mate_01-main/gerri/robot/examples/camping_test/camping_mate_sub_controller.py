@@ -14,9 +14,11 @@ class CampingMateSubController:
         baud = int(os.environ.get("DMD485_BAUD", "19200"))
         dev_id = int(os.environ.get("DMD485_ID", "1"))
 
-        advance_speed = int(os.environ.get("CM_ADVANCE_SPEED", "400"))          # 속도(핵심)
+        advance_speed = int(os.environ.get("CM_ADVANCE_SPEED", "300"))          # 속도(핵심)
+        reverse_speed = int(os.environ.get("CM_REVERSE_SPEED", "150"))
         turn_speed = int(os.environ.get("CM_TURN_SPEED", "200"))   # 좌우 민감도
         steering_speed = int(os.environ.get("CM_STEERING_SPEED", "200"))
+        speed_change = int(os.environ.get("CM_SPEED_CHANGE", "50"))
         timeout = float(os.environ.get("CM_TIMEOUT", "0.25"))
         debug = os.environ.get("CM_DEBUG", "0") == "1"
 
@@ -25,8 +27,10 @@ class CampingMateSubController:
             baud=baud,
             dev_id=dev_id,
             advance_speed=advance_speed,
+            reverse_speed=reverse_speed,
             turn_speed=turn_speed,
             steering_speed=steering_speed,
+            speed_change=speed_change,
             timeout=timeout,
             debug=debug,
         )

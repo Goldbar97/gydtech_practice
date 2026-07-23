@@ -8,7 +8,7 @@ import serial
 ADVANCE_SPEED = 300
 REVERSE_SPEED = 150
 TURN_SPEED = 200
-STEERING_SPEED = 200
+STEERING_SPEED = 130
 SPEED_CHANGE = 50
 
 # 입력 끊김 자동정지(초): 손 떼면 멈추는 민감도
@@ -35,8 +35,8 @@ PID_PNT_MAIN_DATA = 210
 # {"axes":[0,0,0,0],"buttons":[0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0]} B
 # {"axes":[0,0,0,0],"buttons":[0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0]} Y
 IDX_JOY_A = 0
-IDX_JOY_X= 2
 IDX_JOY_B = 1
+IDX_JOY_X= 2
 IDX_JOY_Y = 3
 IDX_KEY_SPACEBAR = 0
 IDX_KEY_9 = 10
@@ -325,13 +325,10 @@ class CampingMateController:
           "한쪽 바퀴만 느리게/빠르게"가 되도록 만든다.
         """
         if base != 0:
-            limit = self.steering_speed
-            turn = clamp(turn, -limit, limit)
             left = base + turn
             right = base - turn
         else:
             # 제자리 회전
-            turn = int(clamp(turn, -self.turn_speed, self.turn_speed))
             left = +turn
             right = -turn
 

@@ -11,6 +11,9 @@ TURN_SPEED = 200
 STEERING_SPEED = 100
 SPEED_CHANGE = 50
 
+INVERT_LEFT = False
+INVERT_RIGHT = False
+
 # 입력 끊김 자동정지(초): 손 떼면 멈추는 민감도
 INPUT_TIMEOUT_SEC = 0.35
 
@@ -27,6 +30,12 @@ PID_REQ_PID_DATA = 4
 
 PID_PNT_OPEN_VEL_CMD = 208
 PID_PNT_MAIN_DATA = 210
+
+# Relay
+RELAY_PORT = 'COM3'
+RELAY_BAUDRATE = 9600
+ON_CMD     = bytes([0xA0, 0x01, 0x01, 0xA2])
+OFF_CMD    = bytes([0xA0, 0x01, 0x00, 0xA1])
 
 # {"axes":[0,0,0,0,0,0],"buttons":[0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0]} 9
 # {"axes":[0,0,0,0,0,0],"buttons":[0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0]} 0
@@ -186,6 +195,12 @@ class CampingMateController:
         self.md = MD485(port, int(baud))
         self.md.set_return_type(self.dev_id, 0)  # 응답 OFF
 
+        try:
+            self.md_relay = MD485(RELAY_PORT, RELAY_BAUDRATE)
+        except Exception:
+            self.md_relay = None
+        self.md_relay_toggle = False
+
         self._lock = threading.Lock()
         self._last_cmd_ts = time.time()
         self._last_out = (0, 0)
@@ -221,6 +236,10 @@ class CampingMateController:
         self.set_openloop(0, 0)
 
     def set_openloop(self, out_l: int, out_r: int):
+        if INVERT_LEFT:
+            out_l = -out_l
+        if INVERT_RIGHT:
+            out_r = -out_r
 
         with self._lock:
             self.md.pnt_open(self.dev_id, out_l, out_r, enable1=1, enable2=1, ret_req=0)
@@ -273,71 +292,13 @@ class CampingMateController:
         self.advance_speed += SPEED_CHANGE
         self.advance_speed = clamp(self.advance_speed, 0, 1023)
 
-    def handle_message(self, topic: str, value, option=None):
-        """
-        topic:
-          /joy: value={"axes":[x,y,...], "buttons":[...]}  (x=좌우, y=앞뒤)
-          move: value={"vx":-1~1, "vth":-1~1} 또는 {"x":..,"y":..}
-          /open: value={"l":int, "r":int}
-          stop: value 무시
-        """
-        self._apply_params_from_option(option)
-
-        if topic in ("/stop", "stop"):
-            self.stop()
-            return
-
-        if topic in ("/open", "open"):
-            if isinstance(value, dict):
-                l = int(value.get("l", 0))
-                r = int(value.get("r", 0))
+    def switch_relay(self):
+        if self.md_relay is not None:
+            if self.md_relay_toggle:
+                self.md_relay.write(ON_CMD)
             else:
-                l, r = 0, 0
-            self.set_openloop(l, r)
-            return
-
-        if topic in ("/move", "move"):
-            if not isinstance(value, dict):
-                self.stop()
-                return
-            vx = float(value.get("vx", value.get("y", 0.0)))
-            vth = float(value.get("vth", value.get("x", 0.0)))
-            base = int(clamp(vx, -1.0, 1.0) * self.advance_speed)
-            turn = int(clamp(vth, -1.0, 1.0) * self.turn_speed)
-            self._mix_and_send(base, turn)
-            return
-
-        if topic in ("/joy", "joy"): # 키보드, 조이스틱
-            if not isinstance(value, dict):
-                self.stop()
-                return
-            axes = value.get("axes", [])
-            buttons = value.get("buttons", [])
-
-            if self._btn(buttons, IDX_KEY_9) or self._btn(buttons, IDX_JOY_Y):
-                self.advance_speed += SPEED_CHANGE
-                self.advance_speed = clamp(self.advance_speed, 0, 1023)
-            
-            if self._btn(buttons, IDX_KEY_0) or self._btn(buttons, IDX_JOY_B):
-                self.advance_speed -= SPEED_CHANGE
-                self.advance_speed = clamp(self.advance_speed, 0, 1023)
-            
-            # if self._btn(buttons, IDX_KEY_SPACEBAR):
-
-            x = clamp(float(axes[0]), -1.0, 1.0) if len(axes) > 0 else 0.0   # 좌(-) 우(+)
-            y = clamp(float(axes[1]), -1.0, 1.0) if len(axes) > 0 else 0.0   # 위(-) 아래(+)
-            if y < 0:
-                base = -y * self.advance_speed   # 위(-1)=전진
-            else:
-                base = -y * self.reverse_speed
-
-            if y != 0:
-                turn = -x * self.steering_speed
-            else:
-                turn = -x * self.turn_speed
-
-            self._mix_and_send(base, turn)
-            return
+                self.md_relay.write(OFF_CMD)
+            self.md_relay_toggle = not self.md_relay_toggle
 
     def _mix_and_send(self, base: int, turn: int):
         """

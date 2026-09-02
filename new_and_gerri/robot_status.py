@@ -29,7 +29,7 @@ class RobotStatus:
                 "y": None,
                 "th": None
             }
-        },
+        }
 
         self.velocity = {
             "linear": {
@@ -75,4 +75,17 @@ class RobotStatus:
             "origin": None,
             "size": None,
             "resolution": None
+        }
+
+    def model_dump(self):
+        return {
+            "robot_id": self.robot_id,
+            "robot_type": self.robot_type,
+            "pose": self.pose,
+            "velocity": self.velocity,
+            "battery_state": self.battery_state,
+            "joint_state": self.joint_state,
+            "path_plan": self.path_plan,
+            "sensor": self.sensor,
+            "map": self.map,
         }

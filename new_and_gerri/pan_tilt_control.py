@@ -84,7 +84,7 @@ class PanTiltController:
 
 if __name__ == "__main__":
     # 사용 예시
-    pt = PanTiltController(port="/dev/ttyUSB1", baudrate=115200)
+    pt = PanTiltController(port="/dev/ttyUSB0", baudrate=115200)
 
     try:
         print("중앙 정렬")

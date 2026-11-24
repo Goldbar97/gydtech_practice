@@ -31,6 +31,7 @@ Rules:
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import threading
 import time
@@ -38,6 +39,8 @@ from dataclasses import dataclass
 from typing import Optional, Set, Tuple
 
 import serial
+
+from snow_robot_log import log, log_every
 
 
 # ============================================================
@@ -163,6 +166,11 @@ class FYConfig:
     input_timeout: float = 0.70
     verbose: bool = False
 
+    # 주행 속도 조절 (C1/C2 버튼): pwm을 step씩 올리고 내리며 min~max로 제한한다.
+    pwm_step: int = 100
+    pwm_min: int = 100
+    pwm_max: int = 1000
+
     # relay
     relay_enabled: bool = True
     relay_port: Optional[str] = None
@@ -189,11 +197,12 @@ def auto_find_relay_port(motor_port: str, exclude_ports: Optional[Tuple[str, ...
     모터 RS485 포트와 exclude_ports(예: 팬틸트 짐벌 포트)는 제외한다.
     /dev/ttyUSB*를 우선 선택한다.
     """
-    exclude = {motor_port}
+    # /dev/serial/by-id/... 같은 심볼릭 링크로 지정해도 실제 장치(/dev/ttyUSB0 등)로 비교한다.
+    exclude = {os.path.realpath(motor_port)}
     if exclude_ports:
-        exclude |= set(exclude_ports)
+        exclude |= {os.path.realpath(p) for p in exclude_ports}
 
-    ports = [p for p in list_serial_ports() if p not in exclude]
+    ports = [p for p in list_serial_ports() if os.path.realpath(p) not in exclude]
 
     if not ports:
         return None
@@ -279,6 +288,34 @@ class RelayUSB:
             print("[RelayUSB] closed")
 
 
+def parse_feedback(rx: bytes, addr: int) -> Optional[dict]:
+    """C0/C1 응답(0xD0/0xD1, 22바이트)을 해석한다. 못 찾거나 CRC가 틀리면 None.
+
+    프레임: addr, 0x16, cmd, Val1(버전), Val2(시스템 상태), Val3(모드), Val4(시작/정지),
+            Val5(방향), Val6-7(최대 PWM), Val8-9(실제 PWM), Val10-11(최대 전류, 10mA),
+            Val12-13(실제 전류, 10mA), Val14-15(전원 전압, 10mV), Val16(온도, 오프셋 40), Val17, CRC_L, CRC_H
+    시스템 상태: > 0x80 정상, < 0x30 오류 코드.
+    """
+    n = len(rx)
+    for i in range(0, n - 21):
+        if rx[i] == (addr & 0xFF) and rx[i + 1] == 0x16 and rx[i + 2] in (0xD0, 0xD1):
+            f = rx[i:i + 22]
+            crc = crc16_modbus(f[:20])
+            if f[20] != (crc & 0xFF) or f[21] != ((crc >> 8) & 0xFF):
+                continue
+            return {
+                "status": f[4],
+                "ok": f[4] > 0x80,
+                "running": f[6],
+                "pwm": (f[10] << 8) | f[11],
+                "current_a": ((f[14] << 8) | f[15]) / 100.0,
+                "voltage_v": ((f[16] << 8) | f[17]) / 100.0,
+                "temp_c": f[18] - 40,
+                "time": time.time(),
+            }
+    return None
+
+
 # ============================================================
 # FY-C100 motor drive
 # ============================================================
@@ -293,6 +330,13 @@ class FYDrive:
         self.verbose = bool(config.verbose)
         self.lock = threading.Lock()
         self.last_pair: Optional[Tuple[int, int, int, int]] = None
+
+        # 모터 컨트롤러 응답 감시 (주소별). C1 명령마다 22바이트 상태 응답이 온다.
+        self.no_resp_limit = int(os.getenv("FY_NO_RESP_LIMIT", "10"))  # 연속 무응답 허용 횟수
+        self.fb = {
+            self.left_addr: {"name": "LEFT", "fails": 0, "down": False, "last": None, "bad_status": None},
+            self.right_addr: {"name": "RIGHT", "fails": 0, "down": False, "last": None, "bad_status": None},
+        }
 
         self.ser = serial.Serial(
             port=config.port,
@@ -342,7 +386,82 @@ class FYDrive:
             frame = make_stop(addr, self.current_a)
         else:
             frame = make_run(addr, direction, pwm, self.current_a)
-        self.send_and_read(frame)
+        rx = self.send_and_read(frame)
+        self._note_feedback(addr, rx)
+
+    def _note_feedback(self, addr: int, rx: bytes):
+        """응답을 해석해 무응답 / 복구 / 컨트롤러 오류 상태를 기록한다 (상태가 바뀔 때만)."""
+        st = self.fb.get(addr)
+        if st is None:
+            return
+        info = parse_feedback(rx, addr) if rx else None
+        name = f"{st['name']}(0x{addr:02X})"
+
+        if info is None:
+            st["fails"] += 1
+            if st["fails"] >= self.no_resp_limit and not st["down"]:
+                st["down"] = True
+                log.error(f"[FY] {name} 모터 컨트롤러 응답 없음 (연속 {st['fails']}회) "
+                          f"-> 모터 전원 / RS485 배선 / 주소 확인")
+            return
+
+        if st["down"]:
+            log.warning(f"[FY] {name} 응답 복구")
+        st["down"] = False
+        st["fails"] = 0
+        st["last"] = info
+
+        if not info["ok"]:
+            if st["bad_status"] != info["status"]:
+                log.error(f"[FY] {name} 컨트롤러 오류 상태 0x{info['status']:02X} "
+                          f"(전류 {info['current_a']:.1f}A, 전압 {info['voltage_v']:.1f}V, 온도 {info['temp_c']}C)")
+            st["bad_status"] = info["status"]
+        else:
+            if st["bad_status"] is not None:
+                log.warning(f"[FY] {name} 오류 상태 해제")
+            st["bad_status"] = None
+
+    def feedback_health(self):
+        """(정상 여부, 설명). snow_robot_log 헬스 체크용."""
+        bad = []
+        for addr, st in self.fb.items():
+            if st["down"]:
+                bad.append(f"{st['name']} 응답 없음")
+            elif st["bad_status"] is not None:
+                bad.append(f"{st['name']} 오류 0x{st['bad_status']:02X}")
+            elif st["last"] and st["last"]["temp_c"] >= 85:
+                bad.append(f"{st['name']} 온도 {st['last']['temp_c']}C")
+        return (not bad), ", ".join(bad)
+
+    def battery_snapshot(self, max_age: float = 3.0) -> Optional[dict]:
+        """두 모터 컨트롤러의 최근 응답을 합쳐 전원 상태를 돌려준다. 유효한 응답이 없으면 None.
+
+        voltage: 응답이 있는 컨트롤러들의 평균 전압(V)
+        current: 전류 합계(A)
+        temperature: 컨트롤러 온도 중 최댓값(C)
+        """
+        now = time.time()
+        infos = [
+            st["last"] for st in self.fb.values()
+            if st["last"] is not None and not st["down"] and now - st["last"]["time"] <= max_age
+        ]
+        if not infos:
+            return None
+        return {
+            "voltage": round(sum(i["voltage_v"] for i in infos) / len(infos), 2),
+            "current": round(sum(i["current_a"] for i in infos), 2),
+            "temperature": max(i["temp_c"] for i in infos),
+        }
+
+    def feedback_summary(self) -> str:
+        parts = []
+        for addr, st in self.fb.items():
+            l = st["last"]
+            if st["down"] or l is None:
+                parts.append(f"{st['name'][0]}:NO_RESP")
+            else:
+                parts.append(f"{st['name'][0]}:{l['voltage_v']:.1f}V/{l['current_a']:.1f}A/{l['temp_c']}C")
+        return ",".join(parts)
 
     def drive_pair(self, left_dir: int, left_pwm: int, right_dir: int, right_pwm: int):
         self.send_wheel(self.left_addr, left_dir, left_pwm)
@@ -422,6 +541,11 @@ class FYMotionController:
         self._prev_relay_requested: Optional[bool] = None
         self._relay_latched = False
 
+        # 속도를 바꿔도 곡선 주행(완만한 쪽 바퀴)의 비율이 유지되도록 처음 비율을 기억한다.
+        self._slow_ratio = float(config.slow_pwm) / float(config.pwm) if config.pwm else 0.0
+        config.pwm = clamp(config.pwm, config.pwm_min, config.pwm_max)
+        config.slow_pwm = clamp(round(config.pwm * self._slow_ratio), 0, 1000)
+
     def start(self):
         if self._running:
             return
@@ -429,18 +553,70 @@ class FYMotionController:
         if self.drive is None:
             try:
                 self.drive = FYDrive(self.config)
+                self.hardware_error = None
             except Exception as e:
+                # 열기에 실패해도 TX 스레드는 시작한다. 스레드가 주기적으로 다시 연다.
                 self.hardware_error = e
-                print(f"[FYMotionController] motor hardware open failed: {e}")
-                return
+                log.error(f"[FYMotionController] 모터 시리얼 열기 실패: {e} -> 백그라운드에서 재시도")
 
         self._open_relay_if_enabled()
 
         self._running = True
-        self.drive.stop_once()
-        self._thread = threading.Thread(target=self._tx_loop, daemon=True)
+        if self.drive is not None:
+            try:
+                self.drive.stop_once()
+            except Exception as e:
+                log.error(f"[FYMotionController] 초기 정지 명령 실패: {e}")
+        self._thread = threading.Thread(target=self._tx_loop, name="FYTxLoop", daemon=True)
         self._thread.start()
         print("[FYMotionController] TX loop started")
+
+    # ---- 모터 시리얼 재연결 (TX 스레드에서만 호출) ----
+    REOPEN_DELAYS = (1.0, 2.0, 5.0)  # 재시도 간격(초). 마지막 값을 계속 사용
+
+    def _drop_drive(self, reason: str):
+        """죽은 시리얼을 정리하고 재연결 대기 상태로 만든다. (정지 명령은 못 보내므로 보내지 않는다)"""
+        drive, self.drive = self.drive, None
+        log.error(f"[FY] 모터 시리얼 연결 끊김으로 판단 ({reason}) -> 재연결 시도")
+        self._reopen_idx = 0
+        self._next_reopen = time.time() + self.REOPEN_DELAYS[0]
+        if drive is not None:
+            try:
+                drive.ser.close()
+            except Exception:
+                pass
+
+    def _try_reopen_drive(self):
+        """재연결 시간이 되면 FYDrive를 다시 만든다. 성공하면 True."""
+        now = time.time()
+        if now < getattr(self, "_next_reopen", 0.0):
+            return False
+        try:
+            drive = FYDrive(self.config)
+        except Exception as e:
+            self.hardware_error = e
+            idx = min(getattr(self, "_reopen_idx", 0) + 1, len(self.REOPEN_DELAYS) - 1)
+            self._reopen_idx = idx
+            self._next_reopen = now + self.REOPEN_DELAYS[idx]
+            log_every("fy_reopen_fail", 10.0, logging.WARNING,
+                      f"[FY] 모터 시리얼 재연결 실패: {e} (다시 시도 중)")
+            return False
+        try:
+            drive.stop_once()
+        except Exception as e:
+            log.error(f"[FY] 재연결 직후 정지 명령 실패: {e}")
+            try:
+                drive.ser.close()
+            except Exception:
+                pass
+            self._next_reopen = now + self.REOPEN_DELAYS[-1]
+            return False
+        self.hardware_error = None
+        self._prev_label = None
+        self._prev_pair = None
+        self.drive = drive
+        log.warning("[FY] 모터 시리얼 재연결 성공")
+        return True
 
     def _open_relay_if_enabled(self):
         if not self.config.relay_enabled:
@@ -461,7 +637,7 @@ class FYMotionController:
             print("[FYMotionController] relay port not found. Relay control disabled.")
             return
 
-        if relay_port in (self.config.relay_exclude_ports or ()):
+        if os.path.realpath(relay_port) in {os.path.realpath(p) for p in (self.config.relay_exclude_ports or ())}:
             # RELAY_PORT를 명시적으로 잘못 지정한 경우까지 방어한다.
             print(
                 f"[FYMotionController] relay_port={relay_port} is an excluded "
@@ -491,13 +667,19 @@ class FYMotionController:
             self._thread = None
 
         if self.drive:
-            self.drive.close()
+            try:
+                self.drive.close()
+            except Exception as e:
+                log.error(f"[FY] 모터 종료 중 오류(정지 명령이 안 나갔을 수 있음): {e}")
             self.drive = None
 
         if self.relay:
             # 종료 시 강제 OFF를 원하면 아래 주석 해제
             # self.relay.off()
-            self.relay.close()
+            try:
+                self.relay.close()
+            except Exception as e:
+                log.error(f"[FY] 릴레이 종료 중 오류: {e}")
             self.relay = None
 
         print("[FYMotionController] stopped")
@@ -553,6 +735,20 @@ class FYMotionController:
     def get_relay_latched(self) -> bool:
         with self._lock:
             return bool(self._relay_latched)
+
+    def adjust_pwm(self, direction: int) -> int:
+        """주행 pwm을 pwm_step만큼 올리거나(+1) 내린다(-1). 새 pwm을 반환한다.
+
+        _decide()가 매 tick config.pwm/slow_pwm을 읽으므로 다음 명령부터 바로 반영된다.
+        slow_pwm은 처음 설정한 비율을 유지하도록 같이 갱신한다.
+        """
+        with self._lock:
+            step = int(self.config.pwm_step)
+            new_pwm = int(self.config.pwm) + (step if direction >= 0 else -step)
+            new_pwm = clamp(new_pwm, self.config.pwm_min, self.config.pwm_max)
+            self.config.pwm = new_pwm
+            self.config.slow_pwm = clamp(round(new_pwm * self._slow_ratio), 0, 1000)
+            return new_pwm
 
     def _split_keys(self, keys: Set[str]):
         motor_keys = {k for k in keys if k in MOTOR_KEYS}
@@ -613,32 +809,49 @@ class FYMotionController:
         return "STOP", DIR_FORWARD, 0, DIR_FORWARD, 0
 
     def _tx_loop(self):
+        err_count = 0
         while self._running:
-            if self.drive is None:
+            try:
+                if self.drive is None:
+                    if self._try_reopen_drive():
+                        err_count = 0
+                    else:
+                        time.sleep(0.2)
+                    continue
+
+                all_keys = self._snapshot_keys()
+                motor_keys, relay_requested = self._split_keys(all_keys)
+
+                self._apply_relay(relay_requested)
+
+                label, ld, lp, rd, rp = self._decide(motor_keys)
+                pair = (ld, lp, rd, rp)
+
+                if label != self._prev_label or pair != self._prev_pair:
+                    keys_text = "".join(sorted(motor_keys)) or "-"
+                    all_text = ",".join(sorted(all_keys)) or "-"
+                    print(
+                        f"[FY] {label} | motor_keys={keys_text} all_keys={all_text} | "
+                        f"L(dir={ld}, pwm={lp}) R(dir={rd}, pwm={rp})"
+                    )
+                    self._prev_label = label
+                    self._prev_pair = pair
+
+                if label == "STOP":
+                    self.drive.stop_once()
+                else:
+                    self.drive.drive_pair(ld, lp, rd, rp)
+
                 time.sleep(SEND_INTERVAL)
-                continue
-
-            all_keys = self._snapshot_keys()
-            motor_keys, relay_requested = self._split_keys(all_keys)
-
-            self._apply_relay(relay_requested)
-
-            label, ld, lp, rd, rp = self._decide(motor_keys)
-            pair = (ld, lp, rd, rp)
-
-            if label != self._prev_label or pair != self._prev_pair:
-                keys_text = "".join(sorted(motor_keys)) or "-"
-                all_text = ",".join(sorted(all_keys)) or "-"
-                print(
-                    f"[FY] {label} | motor_keys={keys_text} all_keys={all_text} | "
-                    f"L(dir={ld}, pwm={lp}) R(dir={rd}, pwm={rp})"
-                )
-                self._prev_label = label
-                self._prev_pair = pair
-
-            if label == "STOP":
-                self.drive.stop_once()
-            else:
-                self.drive.drive_pair(ld, lp, rd, rp)
-
-            time.sleep(SEND_INTERVAL)
+                if err_count:
+                    log.warning(f"[FY] TX loop 복구 (연속 오류 {err_count}회 후)")
+                    err_count = 0
+            except Exception as e:
+                err_count += 1
+                log_every("fy_tx_err", 5.0, logging.ERROR,
+                          f"[FY] TX loop 예외 #{err_count} (모터 시리얼/USB/전원 확인)", exc_info=True)
+                # 시리얼 오류가 3회 연속이면 포트가 죽은 것으로 보고 다시 연다.
+                if err_count >= 3 and self.drive is not None:
+                    self._drop_drive(f"{type(e).__name__}: {e}")
+                    err_count = 0
+                time.sleep(0.2)

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -27,6 +28,8 @@ from gerri.interface.joy_handler.protocols.rubbber_neck_joystick import RubberNe
 
 from snow_robot_config import ROBOT_INFO, VIDEO_INFO, AUDIO_INFO, FY_CONFIG, GIMBAL_CONFIG
 from snow_robot_sub_controller import SnowRobotSubController
+from snow_robot_cam import SnowCamera
+from snow_robot_log import setup_logging, start_monitors, mark_joy, log, log_every
 
 if TYPE_CHECKING:
     from snow_robot_sub_controller import SnowRobotSubController as _SnowRobotSubController
@@ -93,11 +96,13 @@ class SnowRobotBaseController(BaseController):
         topic_text = str(topic or "").lower()
 
         if topic_text in ("/joy", "joy"):
+            mark_joy()
             for handler in self.joystick_message_handler:
                 try:
                     handler.receive_message(value or {})
-                except Exception as e:
-                    print(f"[SnowRobotBaseController] joystick handler error: {e}")
+                except Exception:
+                    log_every("joy_handler_err", 5.0, logging.ERROR,
+                              "[SnowRobotBaseController] joystick handler 예외", exc_info=True)
             # /joy는 RubberNeckJoyStickHandler에서 처리한다.
             # raw /joy를 다시 sub_controller로 넘기지 않는다.
             return
@@ -136,6 +141,8 @@ class RubberNeckJoyStickHandler(JoyMessageHandler):
         self._space_was_pressed = False
         self._back_was_pressed = False
         self._start_was_pressed = False
+        self._c1_was_pressed = False
+        self._c2_was_pressed = False
 
         self._velocity_linear = 0.7
         self._velocity_anguler = 0.4
@@ -246,7 +253,42 @@ class RubberNeckJoyStickHandler(JoyMessageHandler):
             self.sub_controller.gimbal_adjust_speed(+1)
         self._start_was_pressed = start_pressed
 
+    def _update_drive_speed(self, handler: RubberNeckJoyStickProtocol):
+        """C1(버튼 9) = 주행 속도 감소, C2(버튼 0) = 주행 속도 증가.
+
+        누르는 순간(edge)에만 한 번씩 적용한다. 팬틸트 속도(BACK/START)와는 별개다.
+        """
+        if self.sub_controller is None or not hasattr(self.sub_controller, "drive_adjust_speed"):
+            return
+
+        c1_pressed = self._button_pressed(handler.C1)
+        if c1_pressed and not self._c1_was_pressed:
+            print("[RubberNeckJoyStickHandler] C1 press edge -> drive speed down")
+            self.sub_controller.drive_adjust_speed(-1)
+        self._c1_was_pressed = c1_pressed
+
+        c2_pressed = self._button_pressed(handler.C2)
+        if c2_pressed and not self._c2_was_pressed:
+            print("[RubberNeckJoyStickHandler] C2 press edge -> drive speed up")
+            self.sub_controller.drive_adjust_speed(+1)
+        self._c2_was_pressed = c2_pressed
+
     def handle_joy(self, handler: RubberNeckJoyStickProtocol):
+        # JoyMessageHandler 메인 루프는 콜백 예외를 처리하지 않아 스레드가 죽을 수 있다.
+        # 예외가 나면 기록하고 모터/짐벌을 정지시킨 뒤 계속 동작한다.
+        try:
+            self._handle_joy(handler)
+        except Exception:
+            log_every("handle_joy_err", 5.0, logging.ERROR,
+                      "[RubberNeckJoyStickHandler] handle_joy 예외 -> 모터/짐벌 정지", exc_info=True)
+            try:
+                if self.sub_controller is not None:
+                    self.sub_controller.move(keys=set(), vx=0.0, vy=0.0, vth=0.0)
+                    self.sub_controller.gimbal_set_direction(0, 0)
+            except Exception:
+                log_every("handle_joy_stop_err", 5.0, logging.ERROR, "정지 명령도 실패", exc_info=True)
+
+    def _handle_joy(self, handler: RubberNeckJoyStickProtocol):
         vx = 0.0
         vy = 0.0
         vth = 0.0
@@ -279,6 +321,8 @@ class RubberNeckJoyStickHandler(JoyMessageHandler):
         self._update_gimbal(handler)
         # BACK/START(버튼 6/7)로 팬틸트 회전속도 조절.
         self._update_gimbal_speed(handler)
+        # C1/C2(버튼 9/0)로 주행 속도(pwm) 조절.
+        self._update_drive_speed(handler)
 
         if self.sub_controller is not None:
             self.sub_controller.move(keys=keys, vx=vx, vy=vy, vth=vth)
@@ -292,12 +336,13 @@ class RubberNeckJoyStickHandler(JoyMessageHandler):
             )
             self.last_keys = set(keys)
 
-        # LT/RT 포함, WASD 제외 모든 버튼은 릴레이로 사용하므로
-        # 기존 속도 조절 기능은 여기서 비활성화한다.
+        # 버튼 사용처: A=릴레이 토글, 방향키=팬틸트, BACK/START=팬틸트 속도,
+        # C1/C2=주행 속도. 스틱은 주행(w/a/s/d)에 사용한다.
 
 
 
 def main():
+    setup_logging()
     print("[remove_snow] starting")
     print(f"[remove_snow] current dir    = {CURRENT_DIR}")
     print(f"[remove_snow] robot id       = {ROBOT_INFO.get('id')}")
@@ -308,12 +353,31 @@ def main():
     print("[remove_snow] RELAY_PORT env =", os.getenv("RELAY_PORT"))
     print("[remove_snow] GIMBAL_PORT env=", os.getenv("GIMBAL_PORT"))
     print("[remove_snow] RELAY KEY      = SPACE toggle latch only")
+    
+    video_info = {}
+
+    # 자동 복구 카메라 래퍼 (공용 CameraManager의 스레드 사망 -> 영상 멈춤 문제 대응)
+    # 끄려면: SNOW_CAM_WATCHDOG=0
+    if not video_info and os.getenv("SNOW_CAM_WATCHDOG", "1") == "1":
+        for name, cfg in VIDEO_INFO.items():
+            try:
+                video_info[name] = {"source": SnowCamera(
+                    camera_name=name, camera_index=cfg["source"],
+                    width=cfg.get("width", 640), height=cfg.get("height", 480),
+                    fps=cfg.get("fps", 30))}
+                print(f"[remove_snow] self-healing camera '{name}' (source={cfg['source']})")
+            except Exception as e:
+                print(f"[remove_snow] camera '{name}' init failed: {e}")
+
+    if not video_info:
+        print("[remove_snow] WARNING: no camera available, falling back")
+        video_info = VIDEO_INFO
 
     daemon = AdaptiveNetworkDaemon(
         robot_info=ROBOT_INFO,
         network="ketirtc",
         command="command",
-        video_info=VIDEO_INFO,
+        video_info=video_info,
         audio_info=AUDIO_INFO,
     )
     daemon.connect()
@@ -327,6 +391,13 @@ def main():
 
     base_controller.connect()
     joy_handler.connect()
+
+    # 운행 중 장애 감시 (네트워크 / 스레드 / 포트 / 카메라 / 온도 / 메모리)
+    ports = {"motor": FY_CONFIG.get("port")}
+    if GIMBAL_CONFIG.get("enabled", True):
+        ports["gimbal"] = GIMBAL_CONFIG.get("port")
+    cams = {n: v["source"] for n, v in video_info.items() if hasattr(v.get("source"), "health")}
+    start_monitors(sub_controller, cams, ports)
 
     print("[remove_snow] running. Ctrl+C to stop.")
     try:
